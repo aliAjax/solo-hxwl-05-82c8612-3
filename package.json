@@ -4,7 +4,7 @@
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5105",
     "typecheck": "tsc --noEmit",
-    "test:unit": "esbuild test/core.test.ts --bundle --platform=node --format=esm --outfile=/tmp/core-test.mjs && node /tmp/core-test.mjs",
+    "test:unit": "esbuild test/core.test.ts --bundle --platform=node --format=esm --inject:test/local-storage-shim.js --outfile=/tmp/core-test.mjs && node /tmp/core-test.mjs",
     "test:e2e": "node test/e2e.mjs"
   },
   "dependencies": {

@@ -15,10 +15,80 @@ import { CURRENT_VERSION } from "./types";
 
 const isoRe = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$/;
 
+/**
+ * 严格解析日期时间：校验日历合法性，拒绝 2026-02-30 这类会被 Date 自动滚动到 3 月的日期。
+ * 支持：YYYY-MM-DD[ T]HH:mm[:ss[.fff]][Z|±HH:mm]、斜杠日期、Unix 秒/毫秒时间戳。
+ * 不带时区的输入按墙上分量构造（不做时区换算）。
+ */
+export function parseStrictDateTime(s: string): Date | null {
+  const t = s.trim();
+  if (!t) return null;
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    const d = new Date(n > 1e12 ? n : n * 1000);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const m = t.replace(/\//g, "-").match(
+    /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?\s*(Z|[+-]\d{2}:?\d{2})?)?$/,
+  );
+  if (!m) {
+    const d = new Date(t);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const [, y, mo, da, h, mi, se, fracStr, tz] = m;
+  const year = Number(y);
+  const month = Number(mo);
+  const day = Number(da);
+  const hour = h === undefined ? 0 : Number(h);
+  const min = mi === undefined ? 0 : Number(mi);
+  const sec = se === undefined ? 0 : Number(se);
+  const ms = fracStr ? Number(`0.${fracStr}`) * 1000 : 0;
+  if (month < 1 || month > 12 || hour > 23 || min > 59 || sec > 59) return null;
+  let offsetMs = 0;
+  if (tz && tz !== "Z") {
+    const sign = tz[0] === "-" ? -1 : 1;
+    const oh = Number(tz.slice(1, 3));
+    const om = Number(tz.replace(":", "").slice(3, 5));
+    if (oh > 23 || om > 59) return null;
+    offsetMs = sign * (oh * 3600 + om * 60) * 1000;
+  }
+  // 墙上时间（含偏移）构造 UTC，再加回偏移得到墙上分量，回填比对以发现 2/30、4/31 等溢出
+  const d = new Date(Date.UTC(year, month - 1, day, hour, min, sec, ms) - offsetMs);
+  if (Number.isNaN(d.getTime())) return null;
+  const wall = new Date(d.getTime() + offsetMs);
+  if (
+    wall.getUTCFullYear() !== year ||
+    wall.getUTCMonth() !== month - 1 ||
+    wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour ||
+    wall.getUTCMinutes() !== min ||
+    wall.getUTCSeconds() !== sec
+  ) {
+    return null;
+  }
+  return d;
+}
+
+/** 时间解析失败的人类可读原因（区分"不存在的日期"与"格式无法解析"） */
+export function explainTimeError(input: string): string {
+  const t = input.trim().replace(/\//g, "-");
+  const m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T]|$)/);
+  if (m) {
+    const [, y, mo, da] = m;
+    const year = Number(y);
+    const month = Number(mo);
+    const day = Number(da);
+    if (month >= 1 && month <= 12) {
+      const dim = new Date(year, month, 0).getDate();
+      if (day > dim || day < 1) return `日期不存在：${year} 年 ${month} 月只有 ${dim} 天，没有 ${day} 日`;
+    }
+    if (month < 1 || month > 12) return `月份 ${month} 不存在（应为 1~12）`;
+  }
+  return "无法解析时间（支持 YYYY-MM-DD HH:mm 等格式）";
+}
+
 export function isValidTime(s: unknown): s is string {
-  if (typeof s !== "string" || !s) return false;
-  if (isoRe.test(s)) return !Number.isNaN(Date.parse(s));
-  return !Number.isNaN(Date.parse(s));
+  return typeof s === "string" && s !== "" && parseStrictDateTime(s) !== null;
 }
 
 function isNum(v: unknown): v is number {
@@ -141,7 +211,7 @@ function cleanTank(raw: unknown, path: string, issues: ValidationIssue[]): Tank 
     bad = true;
   }
   if (!isValidTime(o.createdAt)) {
-    issues.push(issue(`${path}.createdAt`, "创建时间无法解析", o.createdAt));
+    issues.push(issue(`${path}.createdAt`, typeof o.createdAt === "string" ? explainTimeError(o.createdAt) : "创建时间无法解析", o.createdAt));
     bad = true;
   }
   if (bad) return null;
@@ -172,7 +242,9 @@ function cleanMeasurement(raw: unknown, path: string, issues: ValidationIssue[])
     bad = true;
   }
   if (!isValidTime(o.time)) {
-    issues.push(issue(`${path}.time`, "检测时间无法解析（支持 YYYY-MM-DDTHH:mm 或 YYYY-MM-DD HH:mm）", o.time));
+    issues.push(
+      issue(`${path}.time`, typeof o.time === "string" ? `${explainTimeError(o.time)}（支持 YYYY-MM-DDTHH:mm 或 YYYY-MM-DD HH:mm）` : "检测时间无法解析", o.time),
+    );
     bad = true;
   }
   const values: Measurement["values"] = {};
@@ -213,7 +285,7 @@ function cleanWaterChange(raw: unknown, path: string, issues: ValidationIssue[])
     bad = true;
   }
   if (!isValidTime(o.time)) {
-    issues.push(issue(`${path}.time`, "换水时间无法解析", o.time));
+    issues.push(issue(`${path}.time`, typeof o.time === "string" ? explainTimeError(o.time) : "换水时间无法解析", o.time));
     bad = true;
   }
   if (!isNum(o.percent) || (o.percent as number) <= 0 || (o.percent as number) > 100) {
@@ -302,9 +374,12 @@ export function loadData(raw: string | null): LoadResult {
   const o = parsed as Record<string, unknown>;
   const base = emptyData();
 
-  // 缸型整体缺失（例如该段损坏被置 null）→ 回退内置缸型，保证判定可用
+  // 缸型缺失 / 段损坏 / 清洗后为空 → 一律回退内置缸型并告警，保证判定可用、页面不白屏
   let types = cleanArray(o.tankTypes, "tankTypes", cleanTankType, issues, quarantined);
-  if (types.length === 0 && o.tankTypes === undefined) {
+  if (types.length === 0) {
+    if (o.tankTypes !== undefined) {
+      issues.push(issue("tankTypes", "缸型数据为空或全部损坏，已回退到内置缸型；原有鱼缸可重新指定缸型", o.tankTypes));
+    }
     types = base.tankTypes;
   }
 
@@ -339,7 +414,7 @@ export function loadData(raw: string | null): LoadResult {
   }
   const typeIds = new Set(types.map((t) => t.id));
   for (const t of tanks) {
-    if (!typeIds.has(t.typeId)) issues.push(issue(`tanks#${t.id}`, `引用了不存在的缸型 id「${t.typeId}」，已回退到第一个可用缸型`, t.typeId));
+    if (!typeIds.has(t.typeId)) issues.push(issue(`tanks#${t.id}`, `引用了不存在的缸型 id「${t.typeId}」，已临时使用兜底缸型，可在编辑鱼缸时重新指定`, t.typeId));
   }
 
   return {
@@ -422,23 +497,29 @@ export function parseCsvLine(line: string): string[] {
   return out.map((s) => s.trim());
 }
 
-const CN_TIME_HINT = "YYYY-MM-DD HH:mm";
-
 export function parseFlexibleTime(s: string): string | null {
   const t = s.trim();
   if (!t) return null;
   if (/^\d+$/.test(t)) {
     const n = Number(t);
-    const ms = n > 1e12 ? n : n * 1000;
-    const d = new Date(ms);
+    const d = new Date(n > 1e12 ? n : n * 1000);
     return Number.isNaN(d.getTime()) ? null : d.toISOString();
   }
-  const normalized = t.replace(/\//g, "-").replace(" ", "T");
-  const d = new Date(normalized);
-  if (Number.isNaN(d.getTime())) return null;
-  // 不含时区的本地时间补上本地时区偏移，输出 ISO
+  const d = parseStrictDateTime(t);
+  if (!d) return null;
+  // 不带时区：严格解析按 UTC 承载墙上分量，这里重建为本地同时刻并输出带 Z 的 ISO，
+  // 保证 CSV 里写的 09:00 在界面上仍显示 09:00
   if (!/[zZ]|[+-]\d{2}:?\d{2}$/.test(t)) {
-    return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+    const local = new Date(
+      d.getUTCFullYear(),
+      d.getUTCMonth(),
+      d.getUTCDate(),
+      d.getUTCHours(),
+      d.getUTCMinutes(),
+      d.getUTCSeconds(),
+      d.getUTCMilliseconds(),
+    );
+    return local.toISOString();
   }
   return d.toISOString();
 }
@@ -455,15 +536,19 @@ const WC_HEADERS = ["鱼缸", "时间", "换水比例%", "备注"];
 
 /**
  * 导入 CSV。tankResolver: 按名称找缸；不存在时返回 null（报错指出具体行）
+ * fileName 用于错误定位（指出是哪个文件的哪一行/列）
  */
 export function parseCsv(
   text: string,
   tankResolver: (name: string) => Tank | undefined,
   idGen: () => string,
+  fileName?: string,
 ): CsvResult | { kind: null; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
+  const src = fileName ? `「${fileName}」` : "";
+  const where = (p: string) => (src ? `${src} · ${p}` : p);
   const rawLines = text.replace(/^﻿/, "").split(/\r?\n/).filter((l) => l.trim() !== "");
-  if (rawLines.length === 0) return { kind: null, issues: [issue("(file)", "文件为空")] };
+  if (rawLines.length === 0) return { kind: null, issues: [issue(where("(file)"), "文件为空", fileName)] };
   const header = parseCsvLine(rawLines[0]);
   const kind: "measurement" | "waterchange" | null =
     header.includes("换水比例%") ? "waterchange" : header.includes("氨氮") ? "measurement" : null;
@@ -471,14 +556,14 @@ export function parseCsv(
     return {
       kind: null,
       issues: [
-        issue("(header)", `无法识别的表头。检测记录表头需为：${MEAS_HEADERS.join(", ")}；换水记录表头需为：${WC_HEADERS.join(", ")}`, header.join(",")),
+        issue(where("(header)"), `无法识别的表头。检测记录表头需为：${MEAS_HEADERS.join(", ")}；换水记录表头需为：${WC_HEADERS.join(", ")}`, header.join(",")),
       ],
     };
   }
   const expected = kind === "measurement" ? MEAS_HEADERS : WC_HEADERS;
   const missing = expected.filter((h) => !header.includes(h));
   if (missing.length) {
-    issues.push(issue("(header)", `缺少列：${missing.join("、")}（表头顺序可不同，但名称须一致）`));
+    issues.push(issue(where("(header)"), `缺少列：${missing.join("、")}（表头顺序可不同，但名称须一致）`));
     return { kind: null, issues };
   }
   const col = (h: string) => header.indexOf(h);
@@ -490,25 +575,27 @@ export function parseCsv(
     const rowNo = idx + 2; // 含表头的人类行号
     const cells = parseCsvLine(line);
     if (cells.length > header.length) {
-      issues.push(issue(`第 ${rowNo} 行`, `列数 ${cells.length} 多于表头 ${header.length}，请检查逗号/引号`, line));
+      issues.push(issue(where(`第 ${rowNo} 行`), `列数 ${cells.length} 多于表头 ${header.length}，请检查逗号/引号`, line));
       return;
     }
     const get = (h: string) => (cells[col(h)] ?? "").trim();
     const name = get("鱼缸");
     if (!name) {
-      issues.push(issue(`第 ${rowNo} 行 · 鱼缸`, "鱼缸名称为空"));
+      issues.push(issue(where(`第 ${rowNo} 行 · 鱼缸`), "鱼缸名称为空"));
       return;
     }
     const tank = tankResolver(name);
     if (!tank) {
-      issues.push(issue(`第 ${rowNo} 行 · 鱼缸`, `不存在名为「${name}」的鱼缸（请先在本应用中创建，名称需完全一致）`, name));
+      issues.push(issue(where(`第 ${rowNo} 行 · 鱼缸`), `不存在名为「${name}」的鱼缸（请先在本应用中创建，名称需完全一致）`, name));
       return;
     }
     tankNameToId.set(name, tank.id);
     const timeStr = get("时间");
     const time = parseFlexibleTime(timeStr);
     if (!time) {
-      issues.push(issue(`第 ${rowNo} 行 · 时间`, `无法解析时间「${timeStr}」，格式示例：${CN_TIME_HINT}`, timeStr));
+      issues.push(
+        issue(where(`第 ${rowNo} 行 · 时间`), timeStr.trim() === "" ? "时间为空" : `${explainTimeError(timeStr)}（「${timeStr}」不会自动换算为其它日期）`, timeStr),
+      );
       return;
     }
 
@@ -528,13 +615,13 @@ export function parseCsv(
         if (cell === "") continue;
         const v = Number(cell);
         if (!Number.isFinite(v)) {
-          issues.push(issue(`第 ${rowNo} 行 · ${h}列`, `「${cell}」不是数字`, cell));
+          issues.push(issue(where(`第 ${rowNo} 行 · ${h}列`), `「${cell}」不是数字`, cell));
           rowBad = true;
           continue;
         }
         const p = METRICS[k].physical;
         if (v < p.min || v > p.max) {
-          issues.push(issue(`第 ${rowNo} 行 · ${h}列`, `${METRICS[k].label}=${v} 超出物理可行域 ${p.min}~${p.max}${METRICS[k].unit}`, v));
+          issues.push(issue(where(`第 ${rowNo} 行 · ${h}列`), `${METRICS[k].label}=${v} 超出物理可行域 ${p.min}~${p.max}${METRICS[k].unit}`, v));
           rowBad = true;
           continue;
         }
@@ -542,7 +629,7 @@ export function parseCsv(
       }
       if (rowBad) return;
       if (Object.keys(values).length === 0) {
-        issues.push(issue(`第 ${rowNo} 行`, "至少需要一个指标数值"));
+        issues.push(issue(where(`第 ${rowNo} 行`), "至少需要一个指标数值"));
         return;
       }
       measRows.push({ id: idGen(), tankId: tank.id, time, values, note: get("备注") || undefined });
@@ -550,7 +637,7 @@ export function parseCsv(
       const cell = get("换水比例%");
       const pct = Number(cell);
       if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
-        issues.push(issue(`第 ${rowNo} 行 · 换水比例%列`, `「${cell}」不是 0~100 之间的数字`, cell));
+        issues.push(issue(where(`第 ${rowNo} 行 · 换水比例%列`), `「${cell}」不是 0~100 之间的数字`, cell));
         return;
       }
       wcRows.push({ id: idGen(), tankId: tank.id, time, percent: pct, note: get("备注") || undefined });

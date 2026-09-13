@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { AppData, Measurement, MetricKey, Tank, WaterChange } from "../core/types";
 import { METRICS, METRIC_KEYS, formatMetric, outsideRange } from "../core/metrics";
+import { resolveType } from "../core/analysis";
 import { store } from "../core/store";
 import { nowLocalInput, toLocalInput } from "../core/exporter";
 import { Field, Modal, TextInput, useConfirm } from "./widgets";
@@ -250,14 +251,17 @@ export function MeasurementList({
   data: AppData;
   tankFilter?: string;
   onEdit: (m: Measurement) => void;
-  onDeleted: (n: number, label: string) => void;
+  onDeleted: (n: number, opId: string) => void;
 }): JSX.Element {
   const confirm = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const rows = useMemo(() => {
     return data.measurements
       .filter((m) => (tankFilter ? m.tankId === tankFilter : true))
-      .map((m) => ({ m, tank: data.tanks.find((t) => t.id === m.tankId), type: data.tankTypes.find((t) => t.id === data.tanks.find((x) => x.id === m.tankId)?.typeId) }))
+      .map((m) => {
+        const tank = data.tanks.find((t) => t.id === m.tankId);
+        return { m, tank, type: tank ? resolveType(data, tank) : undefined };
+      })
       .sort((a, b) => Date.parse(b.m.time) - Date.parse(a.m.time));
   }, [data, tankFilter]);
 
@@ -273,11 +277,9 @@ export function MeasurementList({
 
   const remove = (ids: string[]) => {
     const n = ids.length;
-    const label = n > 1 ? `删除 ${n} 条检测记录` : "删除检测记录";
-    // 先取出将被删除的记录用于撤销（撤销直接由 store 快照完成）
-    store.deleteMeasurements(ids);
+    const opId = store.deleteMeasurements(ids);
     setSelected(new Set());
-    onDeleted(n, label);
+    onDeleted(n, opId);
   };
 
   if (rows.length === 0) return <p className="empty-hint">还没有检测记录，点击「新增检测」开始。</p>;
@@ -355,7 +357,7 @@ export function WaterChangeList({
   data: AppData;
   tankFilter?: string;
   onEdit: (w: WaterChange) => void;
-  onDeleted: (n: number, label: string) => void;
+  onDeleted: (n: number, opId: string) => void;
 }): JSX.Element {
   const confirm = useConfirm();
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -375,9 +377,9 @@ export function WaterChangeList({
     });
   const remove = (ids: string[]) => {
     const n = ids.length;
-    store.deleteWaterChanges(ids);
+    const opId = store.deleteWaterChanges(ids);
     setSelected(new Set());
-    onDeleted(n, n > 1 ? `删除 ${n} 条换水记录` : "删除换水记录");
+    onDeleted(n, opId);
   };
   if (rows.length === 0) return <p className="empty-hint">还没有换水记录。</p>;
   const allSelected = rows.every((r) => selected.has(r.id));

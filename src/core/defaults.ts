@@ -61,6 +61,15 @@ export const BUILTIN_TANK_TYPES: TankType[] = [
   },
 ];
 
+/** 无任何可用缸型（数据为空/全部损坏/被删光）时的运行时兜底，保证页面与判定不白屏 */
+export const FALLBACK_TANK_TYPE: TankType = {
+  id: "__fallback_type__",
+  name: "未指定缸型（兜底）",
+  waterChangeCycleDays: 14,
+  builtin: true,
+  ranges: {}, // 无阈值：不产生越界/趋势待办；换水周期类待办仍可判定
+};
+
 export function emptyData(): AppData {
   return {
     version: CURRENT_VERSION,

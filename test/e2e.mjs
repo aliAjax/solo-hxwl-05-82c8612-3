@@ -272,7 +272,105 @@ await ok("单条记录损坏：定位下标/字段，其余数据救回", async 
   assert(rows === 3, `m0、m2(外壳)、m3 三条在表（实际 ${rows} 条）`);
 });
 
-// ========== 7. 离线模式 ==========
+// ========== 7. 二月三十日等非法日期 ==========
+await ok("CSV 导入遇 2026-02-30：报文件名/行/列且不落到 3 月，合法行照常导入", async () => {
+  await reseed(seedOneTank());
+  await page.getByRole("button", { name: "导入导出 / 设置" }).click();
+  const csv = [
+    "鱼缸,时间,pH,氨氮,亚硝酸盐,硝酸盐,硬度GH,温度,备注",
+    "草缸A,2026-02-28 09:00,7.0,,,,,,合法一",
+    "草缸A,2026-02-30 09:00,7.0,,,,,,幽灵日期",
+    "草缸A,2026-03-01 09:00,7.0,,,,,,合法二",
+  ].join("\n");
+  await uploadFile(page, 0, csv, "二月测试.csv");
+  const preview = await page.locator(".import-preview").innerText();
+  assert(preview.includes("二月测试.csv"), "错误应指出文件名：\n" + preview);
+  assert(preview.includes("第 3 行 · 时间"), "应定位第 3 行时间列：\n" + preview);
+  assert(preview.includes("2 月只有 28 天"), "应说明二月天数：\n" + preview);
+  assert(/可导入\s*2\s*行/.test(preview), "两条合法行可导入");
+  assert(!preview.includes("03-02"), "不得滚动成 3 月 2 日");
+
+  await page.getByRole("button", { name: /导入 2 行/ }).click();
+  await page.getByRole("button", { name: "检测 / 换水" }).click();
+  const body = await page.locator("main").innerText();
+  assert(body.includes("合法一") && body.includes("合法二"), "两条合法行已导入");
+  assert(!body.includes("幽灵日期"), "幽灵日期行未导入");
+  const dates = await page.locator("table.data-table tbody td:nth-child(2)").allInnerTexts();
+  assert(dates.every((d) => d.includes("02-28") || d.includes("03-01")), "日期只有 02-28 / 03-01：" + dates.join(","));
+});
+
+// ========== 8. 缸型为空/损坏不白屏 ==========
+await ok("缸型段损坏：回退内置缸型、页面不白屏且可继续新增鱼缸", async () => {
+  const broken = seedOneTank();
+  broken.tankTypes = "BROKEN";
+  await reseed(broken);
+  assert(await page.locator(".app-shell").isVisible(), "外壳正常渲染，没有白屏");
+  const banner = await page.locator(".notice-banner").innerText();
+  assert(banner.includes("缸型") && banner.includes("内置缸型"), "应提示缸型回退：\n" + banner);
+  // 工作台仍可渲染
+  await page.getByRole("button", { name: "工作台" }).click();
+  assert(await page.locator(".panel").first().isVisible(), "工作台面板渲染");
+  // 缸型已回退为内置四套
+  await page.getByRole("button", { name: "鱼缸与缸型" }).click();
+  const typeCards = await page.locator(".type-card").count();
+  assert(typeCards === 4, `应回退 4 个内置缸型（实际 ${typeCards}）`);
+  // 仍可新增鱼缸（下拉有缸型）
+  await page.getByRole("button", { name: "＋ 新增鱼缸" }).click();
+  await page.locator(".modal input").first().fill("兜底后新缸");
+  const typeOptions = await page.locator(".modal select option").count();
+  assert(typeOptions >= 4, "缸型下拉应有内置缸型");
+  await page.getByRole("dialog").getByRole("button", { name: "保存", exact: true }).click();
+  assert(await page.getByText("兜底后新缸").first().isVisible(), "新缸创建成功，应用功能正常");
+});
+
+await ok("缸型为空数组且缸引用了不存在的缸型：使用兜底缸型不崩，换水待办仍生成", async () => {
+  const empty = seedOneTank();
+  empty.tankTypes = [];
+  empty.tanks[0].typeId = "ghost-type";
+  empty.waterChanges = [{ id: "w0", tankId: "t1", time: "2026-01-01T09:00", percent: 30 }];
+  await reseed(empty);
+  assert(await page.locator(".app-shell").isVisible(), "无缸型也不白屏");
+  await page.getByRole("button", { name: "工作台" }).click();
+  const body = await page.locator("main").innerText();
+  assert(body.includes("未换水"), "兜底缸型（14 天周期）下超期换水待办仍应生成");
+  const banner = await page.locator(".notice-banner").innerText();
+  assert(banner.includes("缸型"), "应提示缸型为空");
+});
+
+// ========== 9. 定向撤销：旧 toast 只回退那一次 ==========
+await ok("批量导入后又新增了记录，点旧导入提示的撤销只回退导入，新增记录保留", async () => {
+  await reseed(seedOneTank());
+  await page.getByRole("button", { name: "导入导出 / 设置" }).click();
+  const csv = [
+    "鱼缸,时间,pH,氨氮,亚硝酸盐,硝酸盐,硬度GH,温度,备注",
+    "草缸A,2026-09-05 09:00,7.0,,,,,,导入甲",
+    "草缸A,2026-09-06 09:00,7.0,,,,,,导入乙",
+  ].join("\n");
+  await uploadFile(page, 0, csv, "batch.csv");
+  await page.getByRole("button", { name: /导入 2 行/ }).click();
+
+  // 期间又做了其它操作：手动新增一条检测
+  await page.getByRole("button", { name: "检测 / 换水" }).click();
+  await addMeasurement(page, { nitrate: "7.7" });
+  let rows = await page.locator("table.data-table tbody tr").count();
+  assert(rows === 3, `导入 2 条 + 手动 1 条 = 3（实际 ${rows}）`);
+
+  // 点旧导入 toast 的撤销（此时它已不是栈顶操作）
+  await page.locator(".toast", { hasText: "批量导入" }).getByRole("button", { name: "撤销导入" }).click();
+  await page.waitForTimeout(150);
+  const body = await page.locator("main").innerText();
+  assert(!body.includes("导入甲") && !body.includes("导入乙"), "两次导入只回退那一次导入");
+  assert(body.includes("7.7"), "之后手动新增的记录保留");
+  rows = await page.locator("table.data-table tbody tr").count();
+  assert(rows === 1, `应只剩手动 1 条（实际 ${rows}）`);
+
+  // 之后普通 Ctrl+Z 仍线性可用：撤掉手动新增
+  await page.keyboard.press("Control+z");
+  rows = await page.locator("table.data-table tbody tr").count();
+  assert(rows === 0, `Ctrl+Z 继续撤销手动新增（实际 ${rows} 条）`);
+});
+
+// ========== 10. 离线模式 ==========
 await ok("断网后应用仍可加载并操作（service worker 外壳）", async () => {
   // 先在线访问一次确保 SW 缓存并激活
   await page.goto(BASE, { waitUntil: "networkidle" });
@@ -303,6 +401,40 @@ if (failures.length) {
 }
 
 // ---------- helpers ----------
+async function reseed(dataObj) {
+  await page.evaluate((v) => localStorage.setItem("aq-workbench-data-v1", JSON.stringify(v)), dataObj);
+  await page.goto(BASE, { waitUntil: "networkidle" });
+}
+
+function seedOneTank() {
+  return {
+    version: 1,
+    tankTypes: [
+      {
+        id: "type-planted",
+        name: "草缸",
+        waterChangeCycleDays: 7,
+        builtin: true,
+        ranges: {
+          ph: { min: 6.5, max: 7.5 },
+          ammonia: { min: 0, max: 0.02 },
+          nitrite: { min: 0, max: 0.1 },
+          nitrate: { min: 0, max: 25 },
+          hardness: { min: 3, max: 12 },
+          temperature: { min: 22, max: 26 },
+        },
+      },
+      { id: "type-marine", name: "海缸", waterChangeCycleDays: 14, builtin: true, ranges: { ph: { min: 8, max: 8.4 } } },
+      { id: "type-tanganyika", name: "三湖缸", waterChangeCycleDays: 7, builtin: true, ranges: { ph: { min: 7.8, max: 9 } } },
+      { id: "type-breeding", name: "繁殖缸", waterChangeCycleDays: 3, builtin: true, ranges: { ph: { min: 6.8, max: 7.4 } } },
+    ],
+    tanks: [{ id: "t1", name: "草缸A", typeId: "type-planted", volumeLiters: 60, archived: false, createdAt: "2026-08-01T09:00", note: "" }],
+    measurements: [],
+    waterChanges: [],
+    deleted: { measurements: [], waterChanges: [], tanks: [] },
+  };
+}
+
 async function addMeasurement(p, vals) {
   await p.getByRole("button", { name: "＋ 新增检测" }).click();
   const defs = [

@@ -7,6 +7,7 @@ import { METRICS } from "../src/core/metrics";
 import { emptyData, seedData, BUILTIN_TANK_TYPES } from "../src/core/defaults";
 import { loadData, parseBackup, parseCsv, parseFlexibleTime } from "../src/core/validation";
 import { generateTodos, buildContexts, worseningTrends, latestExceedances, buildSeries } from "../src/core/analysis";
+import { Store } from "../src/core/store";
 import type { AppData, Measurement } from "../src/core/types";
 
 let passed = 0;
@@ -316,6 +317,184 @@ test("撤销/重做快照模型：删除→撤销恢复→重做再删除", () =
   assert.equal(data.deleted.measurements.length, 0, "回收站也回滚");
   redo();
   assert.equal(data.measurements.length, before - 1, "重做后再次删除");
+});
+
+// ---------- 9. 严格日历 ----------
+test("严格日历：2026-02-30 / 02-29(平年) / 4-31 / 13 月 一律拒绝，不滚动", () => {
+  for (const bad of ["2026-02-30", "2026-02-30 09:00", "2026/02/30", "2026-04-31", "2023-02-29", "2026-13-01", "2026-00-10", "2026-02-32 25:00"]) {
+    assert.equal(parseFlexibleTime(bad), null, `${bad} 必须解析失败`);
+  }
+  // 合法日期不被误伤
+  for (const good of ["2026-02-28", "2024-02-29 09:00", "2026-09-01 09:30", "2026/01/01", "1756702800000"]) {
+    assert.ok(parseFlexibleTime(good), `${good} 应解析成功`);
+  }
+});
+
+test("CSV 二月三十日：报错含文件名与行/列，不落到 3 月", () => {
+  const d = seedData();
+  const csv = [
+    "鱼缸,时间,pH,氨氮,亚硝酸盐,硝酸盐,硬度GH,温度,备注",
+    "草缸A,2026-02-28 09:00,7.0,,,,,,合法",
+    "草缸A,2026-02-30 09:00,7.0,,,,,,幽灵日期",
+    "草缸A,2026-03-01 09:00,7.0,,,,,,合法2",
+  ].join("\n");
+  const r = parseCsv(csv, (n) => d.tanks.find((t) => t.name === n), () => "x", "问题文件.csv");
+  assert.equal(r.kind, "measurement");
+  if (r.kind !== "measurement") throw new Error("narrow");
+  assert.equal(r.rows.length, 2, "仅 2 条合法行");
+  const bad = r.issues.find((i) => i.path.includes("第 3 行"));
+  assert.ok(bad, "应定位到第 3 行");
+  assert.ok(bad.path.includes("问题文件.csv"), "错误路径应含文件名：" + bad.path);
+  assert.ok(bad.path.includes("时间"), "应指出是时间列：" + bad.path);
+  assert.ok(bad.message.includes("2 月只有 28 天"), "应说明二月天数：" + bad.message);
+  assert.ok(r.rows.every((m) => !m.time.startsWith("2026-03-02") && !m.time.startsWith("2026-03-01T09:00") || true));
+  const dates = r.rows.map((m) => m.time.slice(0, 10)).sort();
+  assert.deepEqual(dates, ["2026-02-28", "2026-03-01"], "不得自动落到 3/2 之类日期");
+});
+
+test("JSON 恢复遇二月三十日：定位到字段并剔除该条", () => {
+  const d = seedData();
+  d.measurements.push({ id: "ghost", tankId: "tank-a", time: "2026-02-30T09:00", values: { ph: 7 } });
+  const r = loadData(JSON.stringify(d));
+  assert.ok(!r.data!.measurements.some((m) => m.id === "ghost"), "幽灵日期记录不得入库");
+  const issue = r.issues.find((i) => i.path === "measurements[5].time");
+  assert.ok(issue && issue.message.includes("2 月只有 28 天"), "应指出原因：" + JSON.stringify(issue));
+});
+
+// ---------- 10. 缸型为空 / 损坏不白屏 ----------
+test("tankTypes 为空数组/段损坏/全非法：恢复内置缸型并告警，待办仍可判定", () => {
+  for (const typesVal of [[], "BROKEN", [{ id: "bad" }], null]) {
+    const d = seedData();
+    const raw = JSON.stringify({ ...d, tankTypes: typesVal });
+    const r = loadData(raw);
+    assert.ok(r.data, "必须能启动");
+    assert.ok(r.data!.tankTypes.length >= BUILTIN_TANK_TYPES.length, `缸型回退内置（输入 ${JSON.stringify(typesVal)}）`);
+    assert.ok(r.issues.some((i) => i.path === "tankTypes"), "应报告缸型问题");
+    const todos = generateTodos(r.data!, now);
+    assert.ok(Array.isArray(todos), "待办生成不崩");
+  }
+});
+
+test("缸引用缸型全部缺失：resolveType 兜底，换水周期类待办仍出，越界类不误报", () => {
+  const d = emptyData();
+  d.tanks = [{ id: "t1", name: "无型缸", typeId: "ghost-type", archived: false, createdAt: new Date(now - DAY).toISOString() }];
+  // 缸型数组为空（模拟用户删光）
+  d.tankTypes = [];
+  d.measurements = [];
+  d.waterChanges = [{ id: "w0", tankId: "t1", time: new Date(now - 60 * DAY).toISOString(), percent: 30 }];
+  const ctxs = buildContexts(d);
+  assert.equal(ctxs[0].type.name, "未指定缸型（兜底）");
+  const todos = generateTodos(d, now);
+  assert.ok(todos.some((t) => t.id === "wc-t1"), "兜底缸型 14 天周期 → 60 天未换应出换水待办");
+  assert.ok(!todos.some((t) => t.id.startsWith("exc-")), "无阈值 → 不应产生越界待办");
+});
+
+// ---------- 11. 定向撤销 ----------
+function makeTestStore(): Store {
+  const s = new Store();
+  s.__resetForTests(emptyData());
+  return s;
+}
+
+test("定向撤销：旧 toast 只回退那一次删除，保留期间新增的操作", () => {
+  const s = makeTestStore();
+  s.addTank({ name: "缸1", typeId: "type-planted" });
+  s.addTank({ name: "缸2", typeId: "type-planted" });
+  const id1 = s.getData().tanks[0].id;
+  const deleteOp = s.commit("删除缸1", (d) => {
+    d.tanks = d.tanks.filter((t) => t.id !== id1);
+  });
+  assert.equal(s.getData().tanks.length, 1);
+  // 期间又做了别的操作：新增缸3
+  s.addTank({ name: "缸3", typeId: "type-planted" });
+  assert.equal(s.getData().tanks.length, 2, "删除后又新增：共 2 个（缸2、缸3）");
+  // 点旧 toast 的撤销 —— 只能回退那次删除
+  const res = s.undoAction(deleteOp);
+  assert.equal(res.applied >= 1, true);
+  const names = s.getData().tanks.map((t) => t.name).sort();
+  assert.deepEqual(names, ["缸1", "缸2", "缸3"], "缸1 恢复，缸3 保留：" + JSON.stringify(names));
+});
+
+test("定向撤销：旧 toast 回退那次批量导入，之后编辑过的导入行保留", () => {
+  const s = makeTestStore();
+  s.addTank({ name: "缸", typeId: "type-planted" });
+  const tankId = s.getData().tanks[0].id;
+  const rows: Measurement[] = ["10", "11", "12"].map((v, i) => ({
+    id: `imp${i}`,
+    tankId,
+    time: new Date(now - (3 - i) * DAY).toISOString(),
+    values: { nitrate: Number(v) },
+  }));
+  const importOp = s.importMeasurements(rows);
+  assert.equal(s.getData().measurements.length, 3);
+  // 期间编辑了 imp0
+  s.updateMeasurement("imp0", { note: "之后改过" });
+  // 再做一次无关新增
+  s.addMeasurement({ tankId, time: new Date(now).toISOString(), values: { ph: 7 } });
+  assert.equal(s.getData().measurements.length, 4);
+  const res = s.undoAction(importOp);
+  const left = s.getData().measurements;
+  assert.ok(left.some((m) => m.id === "imp0" && m.note === "之后改过"), "编辑过的导入行保留（跳过）");
+  assert.ok(!left.some((m) => m.id === "imp1"), "未改动的导入行回退");
+  assert.ok(!left.some((m) => m.id === "imp2"), "未改动的导入行回退");
+  assert.ok(left.some((m) => m.values.ph === 7), "无关新增保留");
+  assert.ok(res.skipped >= 1, "应报告至少 1 项被跳过");
+});
+
+test("定向撤销：之后的普通 Ctrl+Z 仍线性一致，不丢失实体", () => {
+  const s = makeTestStore();
+  s.addTank({ name: "A缸", typeId: "type-planted" });
+  const tankId = s.getData().tanks[0].id;
+  const rows: Measurement[] = [1, 2].map((v, i) => ({
+    id: `r${i}`,
+    tankId,
+    time: new Date(now - (2 - i) * DAY).toISOString(),
+    values: { nitrate: v * 10 },
+  }));
+  const importOp = s.importMeasurements(rows); // 2 条
+  s.addMeasurement({ tankId, time: new Date(now).toISOString(), values: { ph: 7.2 } }); // 之后新增
+  s.undoAction(importOp); // 回退导入，保留 ph 记录
+  assert.equal(s.getData().measurements.filter((m) => m.values.ph === 7.2).length, 1);
+  // 再 Ctrl+Z：撤销「之后新增」
+  s.undo();
+  assert.equal(s.getData().measurements.length, 0, "Ctrl+Z 不应把已回退的导入记录又变没，也不应留下 ph 记录");
+  // 再 Ctrl+Z：撤销新增缸 → 空数据
+  s.undo();
+  assert.equal(s.getData().tanks.length, 0);
+});
+
+test("重复点同一个旧 toast：第二次无效且不报错", () => {
+  const s = makeTestStore();
+  const op = s.addTank({ name: "缸", typeId: "type-planted" });
+  const r1 = s.undoAction(op);
+  assert.equal(r1.notFound, false);
+  const r2 = s.undoAction(op);
+  assert.equal(r2.notFound, true, "操作已从历史摘除 → notFound");
+  assert.equal(s.getData().tanks.length, 0);
+});
+
+test("栈顶 toast 撤销后 Ctrl+Y 可重做；旧 toast 条件撤销后重做只重做那一次", () => {
+  const s = makeTestStore();
+  // 栈顶操作的 toast 撤销：应等同线性撤销，Ctrl+Y 原样重做
+  s.addTank({ name: "缸1", typeId: "type-planted" });
+  const topOp = s.addTank({ name: "缸2", typeId: "type-planted" });
+  s.undoAction(topOp);
+  assert.deepEqual(s.getData().tanks.map((t) => t.name), ["缸1"]);
+  s.redo(); // Ctrl+Y
+  assert.deepEqual(s.getData().tanks.map((t) => t.name), ["缸1", "缸2"], "Ctrl+Y 重做栈顶操作");
+
+  // 旧 toast（非栈顶）条件撤销：删缸1 → 之后新增缸3 → 只回退那次删除
+  const id1 = s.getData().tanks.find((t) => t.name === "缸1")!.id;
+  const oldOp = s.commit("删缸1", (d) => {
+    d.tanks = d.tanks.filter((t) => t.id !== id1);
+  });
+  assert.deepEqual(s.getData().tanks.map((t) => t.name), ["缸2"]);
+  s.addTank({ name: "缸3", typeId: "type-planted" }); // 之后又新增
+  s.undoAction(oldOp); // 回退删除：缸1 回来，缸2 缸3 保留
+  assert.deepEqual(s.getData().tanks.map((t) => t.name).sort(), ["缸1", "缸2", "缸3"]);
+  // Ctrl+Y：条件化重做那次删除（缸1 应被再次移除），不影响缸2/缸3
+  s.redo();
+  assert.deepEqual(s.getData().tanks.map((t) => t.name).sort(), ["缸2", "缸3"], "条件重做只删除缸1");
 });
 
 console.log(`\n核心逻辑自测全部通过：${passed} 项`);

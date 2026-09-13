@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { MetricKey, Tank, TankType } from "../core/types";
 import { METRICS, METRIC_KEYS } from "../core/metrics";
+import { FALLBACK_TANK_TYPE } from "../core/defaults";
 import { store } from "../core/store";
 import { Field, Modal, TextInput, useConfirm } from "./widgets";
 
@@ -153,7 +154,7 @@ export function TankEditorModal({
   types: TankType[];
 }): JSX.Element {
   const [name, setName] = useState(editing?.name ?? "");
-  const [typeId, setTypeId] = useState(editing?.typeId ?? types[0]?.id ?? "");
+  const [typeId, setTypeId] = useState(editing?.typeId ?? types[0]?.id ?? (types.length === 0 ? FALLBACK_TANK_TYPE.id : ""));
   const [volume, setVolume] = useState(editing?.volumeLiters !== undefined ? String(editing.volumeLiters) : "");
   const [note, setNote] = useState(editing?.note ?? "");
   const nameErr = !name.trim() ? "请填写鱼缸名称" : undefined;
@@ -161,7 +162,9 @@ export function TankEditorModal({
 
   const save = () => {
     if (nameErr || volErr || !typeId) return;
-    const payload = { name: name.trim(), typeId, volumeLiters: volume === "" ? undefined : Number(volume), note: note.trim() || undefined };
+    // 缸型被全部删除时落到运行时兜底缸型（保存后可再编辑指定）
+    const resolvedType = types.some((t) => t.id === typeId) ? typeId : FALLBACK_TANK_TYPE.id;
+    const payload = { name: name.trim(), typeId: resolvedType, volumeLiters: volume === "" ? undefined : Number(volume), note: note.trim() || undefined };
     if (editing) store.updateTank(editing.id, payload);
     else store.addTank(payload);
     onClose();
@@ -189,6 +192,7 @@ export function TankEditorModal({
         </Field>
         <Field label="缸型（决定安全区间与换水周期）">
           <select className="input" value={typeId} onChange={(e) => setTypeId(e.target.value)}>
+            {types.length === 0 && <option value="">暂无缸型（将使用兜底缸型：14 天换水周期、不做阈值判定）</option>}
             {types.map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name}（{t.waterChangeCycleDays} 天周期{!t.builtin ? " · 自定义" : ""}）

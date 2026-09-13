@@ -1,4 +1,5 @@
 import { METRICS, METRIC_KEYS, exceedRatio, formatMetric, outsideRange } from "./metrics";
+import { FALLBACK_TANK_TYPE } from "./defaults";
 import type {
   AppData,
   Measurement,
@@ -17,7 +18,7 @@ export interface TankContext {
 }
 
 export function resolveType(data: AppData, tank: Tank): TankType {
-  return data.tankTypes.find((t) => t.id === tank.typeId) ?? data.tankTypes[0];
+  return data.tankTypes.find((t) => t.id === tank.typeId) ?? data.tankTypes[0] ?? FALLBACK_TANK_TYPE;
 }
 
 export function buildContexts(data: AppData, opts?: { includeArchived?: boolean }): TankContext[] {

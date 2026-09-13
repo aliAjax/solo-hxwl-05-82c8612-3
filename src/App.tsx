@@ -3,6 +3,7 @@ import "./styles.css";
 import type { AppData, Measurement, Tank, TankType, WaterChange } from "./core/types";
 import { store, useStore } from "./core/store";
 import { METRICS, METRIC_KEYS } from "./core/metrics";
+import { FALLBACK_TANK_TYPE } from "./core/defaults";
 import { downloadText } from "./core/exporter";
 import { Dashboard } from "./ui/dashboard";
 import { TrendView } from "./ui/trends";
@@ -72,7 +73,7 @@ function TankManager({ toast }: { toast: ToastFn }): JSX.Element {
   const [tankState, setTankState] = useState<EditState<Tank>>(null);
   const [typeState, setTypeState] = useState<EditState<TankType>>(null);
   const [showArchived, setShowArchived] = useState(false);
-  const typeOf = (id: string) => data.tankTypes.find((t) => t.id === id);
+  const typeOf = (id: string) => data.tankTypes.find((t) => t.id === id) ?? FALLBACK_TANK_TYPE;
   const visible = data.tanks.filter((t) => t.archived === showArchived);
 
   return (
@@ -136,8 +137,8 @@ function TankManager({ toast }: { toast: ToastFn }): JSX.Element {
                         className="link-btn danger-text"
                         onClick={() =>
                           confirm.ask(`彻底删除「${tank.name}」及其全部检测/换水记录？记录会进入回收站，整体操作可撤销。`, () => {
-                            store.purgeTank(tank.id);
-                            toast("鱼缸已彻底删除（记录进入回收站）", { label: "撤销", run: () => store.undo() });
+                            const opId = store.purgeTank(tank.id);
+                            toast("鱼缸已彻底删除（记录进入回收站）", { label: "撤销", run: () => store.undoAction(opId) });
                           })
                         }
                       >
@@ -233,8 +234,8 @@ function RecordsPage({ focusTank, toast }: { focusTank?: string; toast: ToastFn 
             data={data}
             tankFilter={tankFilter || undefined}
             onEdit={(m) => setMeasState({ mode: "edit", item: m })}
-            onDeleted={(n) =>
-              toast(`已删除 ${n} 条检测记录（可在回收站/撤销中恢复）`, { label: "撤销删除", run: () => store.undo() })
+            onDeleted={(n, opId) =>
+              toast(`已删除 ${n} 条检测记录（可在回收站/撤销中恢复）`, { label: "撤销删除", run: () => store.undoAction(opId) })
             }
           />
         ) : (
@@ -242,7 +243,7 @@ function RecordsPage({ focusTank, toast }: { focusTank?: string; toast: ToastFn 
             data={data}
             tankFilter={tankFilter || undefined}
             onEdit={(w) => setWcState({ mode: "edit", item: w })}
-            onDeleted={(n) => toast(`已删除 ${n} 条换水记录`, { label: "撤销删除", run: () => store.undo() })}
+            onDeleted={(n, opId) => toast(`已删除 ${n} 条换水记录`, { label: "撤销删除", run: () => store.undoAction(opId) })}
           />
         )}
       </section>

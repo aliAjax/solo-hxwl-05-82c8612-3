@@ -64,6 +64,7 @@ export function SettingsView({ data, toast }: { data: AppData; toast: ToastFn })
       text,
       (name) => data.tanks.find((t) => t.name === name && !t.archived) ?? data.tanks.find((t) => t.name === name),
       () => `imp-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      fileName,
     );
     if (r.kind === null) {
       setPreview({ kind: "meas", rows: [], issues: r.issues, fileName });
@@ -80,24 +81,26 @@ export function SettingsView({ data, toast }: { data: AppData; toast: ToastFn })
     if (!preview || preview.kind === "backup") return;
     const n = preview.rows.length;
     if (n === 0) return;
-    if (preview.kind === "meas") store.importMeasurements(preview.rows as never);
-    else store.importWaterChanges(preview.rows as never);
-    const label = `批量导入 ${n} 条${preview.kind === "meas" ? "检测" : "换水"}记录`;
+    const fileName = preview.fileName;
+    const issueCount = preview.issues.length;
+    const opId =
+      preview.kind === "meas"
+        ? store.importMeasurements(preview.rows as never)
+        : store.importWaterChanges(preview.rows as never);
     setPreview(null);
-    toast(`已${label}（文件：${preview.fileName}）${preview.issues.length ? `，另有 ${preview.issues.length} 条问题行未导入` : ""}`, {
+    toast(`已批量导入 ${n} 条${preview.kind === "meas" ? "检测" : "换水"}记录（文件：${fileName}）${issueCount ? `，另有 ${issueCount} 条问题行未导入` : ""}`, {
       label: "撤销导入",
-      run: () => store.undo(),
+      run: () => store.undoAction(opId),
     });
-    void label;
   };
 
   const doImportBackup = () => {
     if (!preview || preview.kind !== "backup" || !preview.result.data) return;
     const next = preview.result.data;
-    const label = `导入备份「${preview.fileName}」`;
-    store.replaceAll(next, label);
+    const fileName = preview.fileName;
+    const opId = store.replaceAll(next, `导入备份「${fileName}」`);
     setPreview(null);
-    toast("备份已无损导回（全量替换，含缸型阈值与回收站）", { label: "撤销", run: () => store.undo() });
+    toast("备份已无损导回（全量替换，含缸型阈值与回收站）", { label: "撤销", run: () => store.undoAction(opId) });
   };
 
   return (
@@ -208,8 +211,8 @@ export function SettingsView({ data, toast }: { data: AppData; toast: ToastFn })
             className="btn ghost"
             onClick={() =>
               confirm.ask("恢复为内置示例数据？当前数据会被替换（可撤销）。", () => {
-                store.resetAll(true);
-                toast("已恢复示例数据", { label: "撤销", run: () => store.undo() });
+                const opId = store.resetAll(true);
+                toast("已恢复示例数据", { label: "撤销", run: () => store.undoAction(opId) });
               })
             }
           >
@@ -219,8 +222,8 @@ export function SettingsView({ data, toast }: { data: AppData; toast: ToastFn })
             className="btn danger"
             onClick={() =>
               confirm.ask("确定清空全部鱼缸与记录？此操作本身可撤销，但建议先导出 JSON 备份。", () => {
-                store.resetAll(false);
-                toast("已清空全部数据", { label: "撤销", run: () => store.undo() });
+                const opId = store.resetAll(false);
+                toast("已清空全部数据", { label: "撤销", run: () => store.undoAction(opId) });
               })
             }
           >
